@@ -8,8 +8,8 @@
 		<version>2.7.12</version>
 		<relativePath/> <!-- lookup parent from repository -->
 	</parent>
-	<groupId>com.test</groupId>
-	<artifactId>p2p-poc</artifactId>
+	<groupId>com.web.http</groupId>
+	<artifactId>websocket-client</artifactId>
 	<version>0.0.1-SNAPSHOT</version>
 	<name>p2p-poc</name>
 	<description>p2p-poc</description>

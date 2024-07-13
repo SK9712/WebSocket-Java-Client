@@ -1,4 +1,4 @@
-package com.test.poc;
+package com.web.http;
 
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.TextMessage;

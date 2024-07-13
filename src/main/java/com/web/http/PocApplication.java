@@ -1,4 +1,4 @@
-package com.test.poc;
+package com.web.http;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
