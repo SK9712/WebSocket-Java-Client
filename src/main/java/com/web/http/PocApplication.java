@@ -1,21 +1,37 @@
 package com.web.http;
 
-import org.springframework.boot.SpringApplication;
-import org.springframework.boot.autoconfigure.SpringBootApplication;
-
+import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
 import java.util.Base64;
 import java.util.Random;
 
-@SpringBootApplication
+
 public class PocApplication {
 
 	public static void main(String[] args) throws Exception{
 		// Create the HTTP request string with proper line endings
-		String key = Base64.getEncoder().encodeToString("randomkey12345".getBytes());
 
+		// Open a SocketChannel and connect to the server
+		SocketChannel client = SocketChannel.open(new InetSocketAddress("localhost", 9095));
+		client.configureBlocking(true);
+
+		if (client.isConnected()) {
+			// Write the request to the server
+			performHandshake(client);
+
+			sendPingFrame(client);
+
+			sendTextFrameWithMask(client, "Pong");
+
+			// Read the server's response
+			readFrame(client);
+		}
+	}
+
+	private static void performHandshake(SocketChannel client) throws IOException {
+		String key = Base64.getEncoder().encodeToString("randomkey12345".getBytes());
 		String request = "GET /poc/socket HTTP/1.1\r\n" +
 				"Host: localhost\r\n" +
 				"Upgrade: websocket\r\n" +
@@ -23,49 +39,50 @@ public class PocApplication {
 				"Sec-WebSocket-Key: " + key + "\r\n" +
 				"Sec-WebSocket-Version: 13\r\n" +
 				"\r\n";
-
-		// Wrap the request string into a ByteBuffer
 		ByteBuffer buffer = ByteBuffer.wrap(request.getBytes());
+		client.write(buffer);
 
-		// Open a SocketChannel and connect to the server
-		SocketChannel client = SocketChannel.open(new InetSocketAddress("localhost", 9095));
+		ByteBuffer responseBuffer = ByteBuffer.allocate(2024);
+		client.read(responseBuffer);
+		responseBuffer.flip();
+		byte[] responseData = new byte[responseBuffer.remaining()];
+		responseBuffer.get(responseData);
+		String response = new String(responseData);
+		System.out.println("Handshake response: " + response);
+	}
 
-		if (client.isConnected()) {
-			// Write the request to the server
-			client.write(buffer);
-			buffer.clear();
+	private static void sendPingFrame(SocketChannel client) throws IOException {
+		ByteBuffer frame = ByteBuffer.allocate(2 + 4);  // 2 bytes for header, 4 bytes for masking key
 
-			// Read the response from the server
-			ByteBuffer responseBuffer = ByteBuffer.allocate(2024);
-			int bytesRead = client.read(responseBuffer);
-			responseBuffer.flip();
-			byte[] responseData = new byte[bytesRead];
-			responseBuffer.get(responseData);
-			String response = new String(responseData).trim();
-			System.out.println("response=" + response);
-			responseBuffer.clear();
+		// Frame Header
+		frame.put((byte) 0x89);  // FIN bit set (1), RSV1, RSV2, RSV3 bits cleared (0), Opcode 0x9 for Ping
+		frame.put((byte) 0x80);  // Mask bit set (1), Payload length 0 (no payload)
 
-			// Check the response for the "101 Switching Protocols" status
-//			if (!response.contains("101 Switching Protocols")) {
-//				throw new RuntimeException("WebSocket handshake failed: " + response);
-//			}
+		// Masking Key
+		byte[] maskingKey = new byte[4];
+		new Random().nextBytes(maskingKey);
+		frame.put(maskingKey);
 
-			sendTextFrameWithMask(client, "Pong");
+		frame.flip();
+		client.write(frame);
+		System.out.println("Sent Ping frame without payload");
+	}
 
-			// Read the server's response
-			ByteBuffer responseBuffer2 = ByteBuffer.allocate(1024);
-			int bytesRead2 = client.read(responseBuffer2);
-			responseBuffer2.flip();
-			byte[] responseData2 = new byte[bytesRead2];
-			responseBuffer2.get(responseData2);
-			String response2 = new String(responseData2).trim();
-			System.out.println("Server Response: " + response2);
-		}
+	private static void sendCloseFrame(SocketChannel client) throws IOException {
+		ByteBuffer frame = ByteBuffer.allocate(2 + 4);
 
-		// Close the client connection
-		client.close();
+		// Frame Header
+		frame.put((byte) 0x88);  // FIN bit set (1), RSV1, RSV2, RSV3 bits cleared (0), Opcode 0x8 for Close
+		frame.put((byte) 0x80);  // Mask bit set (1), Payload length 0 (no payload)
 
-//		SpringApplication.run(PocApplication.class, args);
+		// Masking Key
+		byte[] maskingKey = new byte[4];
+		new Random().nextBytes(maskingKey);
+		frame.put(maskingKey);
+
+		frame.flip();
+		client.write(frame);
+		System.out.println("Sent Close frame");
 	}
 
 	private static void sendTextFrameWithMask(SocketChannel client, String message) throws Exception {
@@ -91,5 +108,116 @@ public class PocApplication {
 
 		// Write the Text Frame to the server
 		client.write(textFrame);
+	}
+
+	private static void sendLargeTextMessage(SocketChannel client) throws IOException {
+		String message = "This is a very large text message that needs to be fragmented into multiple frames.";
+		byte[] payload = message.getBytes();
+
+		int frameSize = 10; // Define the size of each frame's payload
+		int offset = 0;
+
+		// Send the first frame
+		int length = Math.min(frameSize, payload.length - offset);
+		sendFrame(client, payload, offset, length, true, false); // FIN = false, Opcode = Text
+		offset += length;
+
+		// Send continuation frames
+		while (offset < payload.length) {
+			length = Math.min(frameSize, payload.length - offset);
+			sendFrame(client, payload, offset, length, offset + length == payload.length, true); // FIN = true if it's the last frame, Opcode = Continuation
+			offset += length;
+		}
+	}
+
+	private static void sendFrame(SocketChannel client, byte[] payload, int offset, int length, boolean fin, boolean continuation) throws IOException {
+		ByteBuffer frame = ByteBuffer.allocate(2 + length + 4);
+
+		// Frame Header
+		byte opcode = continuation ? (byte) 0x0 : (byte) 0x1; // Opcode 0x0 for Continuation, 0x1 for Text
+		byte finBit = (byte) (fin ? 0x80 : 0x00); // FIN bit set or not
+		frame.put((byte) (finBit | opcode));
+		frame.put((byte) (0x80 | length)); // Mask bit set (1), Payload length
+
+		// Masking Key
+		byte[] maskingKey = new byte[4];
+		new Random().nextBytes(maskingKey);
+		frame.put(maskingKey);
+
+		// Apply masking to the payload
+		for (int i = offset; i < offset + length; i++) {
+			frame.put((byte) (payload[i] ^ maskingKey[(i - offset) % 4]));
+		}
+
+		frame.flip();
+		client.write(frame);
+		System.out.println("Sent " + (continuation ? "Continuation" : "Text") + " frame, FIN: " + fin);
+	}
+
+	private static void sendTextFrameWithoutMask(SocketChannel client) throws IOException {
+		String message = "Hello, WebSocket!";
+		byte[] payload = message.getBytes();
+		ByteBuffer frame = ByteBuffer.allocate(2 + payload.length);
+
+		// Frame Header
+		frame.put((byte) 0x81);  // FIN bit set (1), RSV1, RSV2, RSV3 bits cleared (0), Opcode 0x1 for Text
+		frame.put((byte) payload.length);  // Mask bit not set (0), Payload length
+
+		// Payload
+		frame.put(payload);
+
+		frame.flip();
+		client.write(frame);
+		System.out.println("Sent Text frame without mask");
+	}
+
+	private static void sendPongFrame(SocketChannel client) throws IOException {
+		ByteBuffer frame = ByteBuffer.allocate(2 + 4);  // 2 bytes for header, 4 bytes for masking key
+
+		// Frame Header
+		frame.put((byte) 0x8A);  // FIN bit set (1), RSV1, RSV2, RSV3 bits cleared (0), Opcode 0xA for Pong
+		frame.put((byte) 0x80);  // Mask bit set (1), Payload length 0 (no payload)
+
+		// Masking Key
+		byte[] maskingKey = new byte[4];
+		new Random().nextBytes(maskingKey);
+		frame.put(maskingKey);
+
+		frame.flip();
+		client.write(frame);
+		System.out.println("Sent Pong frame");
+	}
+
+	private static void sendBinaryFrame(SocketChannel client) throws IOException {
+		byte[] payload = "Binary data".getBytes();
+		ByteBuffer frame = ByteBuffer.allocate(2 + payload.length + 4);
+
+		// Frame Header
+		frame.put((byte) 0x82);  // FIN bit set (1), RSV1, RSV2, RSV3 bits cleared (0), Opcode 0x2 for Binary
+		frame.put((byte) (0x80 | payload.length));  // Mask bit set (1), Payload length
+
+		// Masking Key
+		byte[] maskingKey = new byte[4];
+		new Random().nextBytes(maskingKey);
+		frame.put(maskingKey);
+
+		// Apply masking to the payload
+		for (int i = 0; i < payload.length; i++) {
+			frame.put((byte) (payload[i] ^ maskingKey[i % 4]));
+		}
+
+		frame.flip();
+		client.write(frame);
+		System.out.println("Sent Binary frame");
+	}
+
+	private static void readFrame(SocketChannel client) throws IOException {
+		ByteBuffer buffer = ByteBuffer.allocate(2024);
+		int bytesRead = client.read(buffer);
+		buffer.flip();
+		byte[] responseData = new byte[buffer.remaining()];
+		buffer.get(responseData);
+		String response = new String(responseData);
+		System.out.println("Received frame: " + response);
 	}
 }
